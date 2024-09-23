@@ -6,184 +6,176 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
 # Load the dataset
 data_path = 'all_seasons.csv'
 players_df = pd.read_csv(data_path)
 
-# Filter players within the 5-year window (e.g., 2015-2019)
+# Filter players within the 5-year window (2015-2019)
 selected_years = ['2015-16', '2016-17', '2017-18', '2018-19', '2019-20']
 pool_df = players_df[players_df['season'].isin(selected_years)]
 
 # Randomly select 100 players from the filtered pool
 pool_df = pool_df.sample(n=100, random_state=42)
 
-# Define a function to calculate scores for each role
+# Define a function to calculate scores for each role with simplified metrics
 def calculate_role_scores(df):
-    # Calculate scores for each role based on relevant statistics
-    df['scorer_score'] = df['pts'] * df['ts_pct']
-    df['playmaker_score'] = df['ast'] * df['ast_pct']
-    df['rebounder_score'] = df['reb'] * (df['oreb_pct'] + df['dreb_pct'])
-    df['defender_score'] = df['net_rating'] + df['reb']
-    df['utility_score'] = df['pts'] + df['reb'] + df['ast']
+    df['scorer_score'] = df['pts']
+    df['playmaker_score'] = df['ast']
+    df['rebounder_score'] = df['reb']
+    df['defender_score'] = df['net_rating']
+    df['utility_score'] = (df['pts'] + df['reb'] + df['ast']) / 3  # Average instead of sum
+    df['impact_score'] = df['usg_pct'] * df['net_rating']
+    df['size_factor'] = df['player_height'] * df['player_weight']
     return df
 
-# Apply the scoring function
+# Apply the simplified scoring function
 scored_df = calculate_role_scores(pool_df)
 
-# Define real labels based on the highest score for each player
-def assign_role(row):
-    scores = {
-        0: row['scorer_score'],    # Scorer
-        1: row['playmaker_score'], # Playmaker
-        2: row['rebounder_score'], # Rebounder
-        3: row['defender_score'],  # Defender
-        4: row['utility_score']    # Utility
-    }
-    return max(scores, key=scores.get)
-
-# Assign labels based on the defined strategy
-scored_df['role_label'] = scored_df.apply(assign_role, axis=1)
-labels = scored_df['role_label'].values
-
-# Extract features
+# Extract balanced feature columns for each role model
 features = scored_df[['scorer_score', 'playmaker_score', 'rebounder_score', 
-                      'defender_score', 'utility_score']].values
+                      'defender_score', 'utility_score', 'impact_score', 'size_factor']].values
 
 # Standardize the features
 scaler = StandardScaler()
 features_scaled = scaler.fit_transform(features)
 
-# Split into training and test sets
-X_train, X_test, y_train, y_test = train_test_split(features_scaled, labels, test_size=0.2, random_state=42)
-
-# Convert to tensors
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train, dtype=torch.long)
-y_test_tensor = torch.tensor(y_test, dtype=torch.long)
+# Convert to tensors for each role
+X_tensor = torch.tensor(features_scaled, dtype=torch.float32)
 
 # Define the neural network class
-class OptimalTeamMLP(nn.Module):
-    def __init__(self, input_size, hidden_sizes, output_size):
-        super(OptimalTeamMLP, self).__init__()
+class RoleSpecificMLP(nn.Module):
+    def __init__(self, input_size, hidden_sizes):
+        super(RoleSpecificMLP, self).__init__()
         self.layers = nn.Sequential(
             nn.Linear(input_size, hidden_sizes[0]),
             nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(hidden_sizes[0], hidden_sizes[1]),
             nn.ReLU(),
-            nn.Linear(hidden_sizes[1], output_size),
-            nn.Softmax(dim=1)
+            nn.Dropout(0.3),
+            nn.Linear(hidden_sizes[1], 1)  # Single output for ranking
         )
 
     def forward(self, x):
         return self.layers(x)
 
 # Model parameters
-input_size = X_train.shape[1]
-hidden_sizes = [64, 32]
-output_size = 5
+input_size = X_tensor.shape[1]
+hidden_sizes = [128, 64]
 
-# Instantiate the model
-model = OptimalTeamMLP(input_size, hidden_sizes, output_size)
-
-# Compute class weights to handle imbalance
-class_counts = np.bincount(y_train)
-class_weights = 1.0 / class_counts
-weights = torch.tensor(class_weights, dtype=torch.float32)
-
-# Define weighted loss function and optimizer
-criterion = nn.CrossEntropyLoss(weight=weights)  # Using weighted loss to address imbalance
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# Training the model
-epochs = 100
-loss_history = []
-for epoch in range(epochs):
-    outputs = model(X_train_tensor)
-    loss = criterion(outputs, y_train_tensor)
-    loss_history.append(loss.item())
+# Function to train and rank players for a specific role and display a grid heatmap
+def train_role_model(X_tensor, target_score, role_name):
+    # Prepare target scores for the specific role
+    y_tensor = torch.tensor(target_score, dtype=torch.float32).view(-1, 1)
     
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    # Split into training and testing
+    X_train, X_test, y_train, y_test = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=42)
     
-    if (epoch + 1) % 10 == 0:
-        print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
+    # Instantiate the model
+    model = RoleSpecificMLP(input_size, hidden_sizes)
+    
+    # Define loss function and optimizer
+    criterion = nn.MSELoss()  # Regression to rank players
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # Train the model
+    epochs = 100
+    for epoch in range(epochs):
+        model.train()
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch + 1) % 10 == 0:
+            print(f'{role_name} - Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
+    
+    # Rank players by role score using trained model
+    model.eval()
+    with torch.no_grad():
+        predictions = model(X_tensor).numpy().flatten()
+        scored_df[f'{role_name}_predicted_score'] = predictions
 
-# Plot loss over epochs
-plt.figure(figsize=(10, 5))
-plt.plot(range(1, epochs + 1), loss_history, marker='o')
-plt.title('Loss Over Epochs')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.grid()
-plt.show()
+    # Reshape predictions into a 10x10 grid for visualization
+    grid_scores = np.array(predictions).reshape(10, 10)
+    
+    # Return the grid scores and candidate DataFrame for further processing
+    return grid_scores, scored_df[[f'{role_name}_predicted_score', 'player_name', 'team_abbreviation', 'scorer_score', 
+                                   'playmaker_score', 'rebounder_score', 'defender_score', 'utility_score']]
 
-# Evaluate the model on test data
-model.eval()
-with torch.no_grad():
-    test_outputs = model(X_test_tensor)
-    _, predicted_labels = torch.max(test_outputs, 1)
-    accuracy = (predicted_labels == y_test_tensor).float().mean()
-    print(f"\nTest Accuracy: {accuracy.item() * 100:.2f}%")
+# Train separate models and collect all player predictions for each role
+scorer_grid, scorer_candidates = train_role_model(X_tensor, scored_df['scorer_score'].values, 'Scorer')
+playmaker_grid, playmaker_candidates = train_role_model(X_tensor, scored_df['playmaker_score'].values, 'Playmaker')
+rebounder_grid, rebounder_candidates = train_role_model(X_tensor, scored_df['rebounder_score'].values, 'Rebounder')
+defender_grid, defender_candidates = train_role_model(X_tensor, scored_df['defender_score'].values, 'Defender')
+utility_grid, utility_candidates = train_role_model(X_tensor, scored_df['utility_score'].values, 'Utility')
 
-# Generate the confusion matrix
-cm = confusion_matrix(y_test, predicted_labels.numpy(), labels=np.arange(output_size))
+# Combine all predictions into a single DataFrame
+all_candidates = pd.concat([scorer_candidates, playmaker_candidates, rebounder_candidates, defender_candidates, utility_candidates])
 
-# Display the confusion matrix manually
-fig, ax = plt.subplots(figsize=(8, 6))
-cax = ax.matshow(cm, cmap='Blues')
-fig.colorbar(cax)
+# Ensure no duplicates and assign players based on best fit
+assigned_players = set()
+optimal_team = []
 
-# Set tick positions and labels to match the expected classes
-ax.set_xticks(np.arange(output_size))
-ax.set_yticks(np.arange(output_size))
-display_labels = ['Scorer', 'Playmaker', 'Rebounder', 'Defender', 'Utility']
-ax.set_xticklabels(display_labels, rotation=45, ha="right")
-ax.set_yticklabels(display_labels)
+# Define roles and their candidates
+role_order = [
+    ('Scorer', scorer_candidates),
+    ('Playmaker', playmaker_candidates),
+    ('Rebounder', rebounder_candidates),
+    ('Defender', defender_candidates),
+    ('Utility', utility_candidates)
+]
 
-# Display counts on the confusion matrix cells
-for i in range(output_size):
-    for j in range(output_size):
-        ax.text(j, i, str(cm[i, j]), ha='center', va='center', color='black')
+# Assign players based on highest available role score
+selected_positions = {}
+for role_name, candidates in role_order:
+    candidates = candidates.sort_values(by=f'{role_name}_predicted_score', ascending=False)
+    for _, player in candidates.iterrows():
+        if player['player_name'] not in assigned_players:
+            player['predicted_role'] = role_name
+            optimal_team.append(player)
+            assigned_players.add(player['player_name'])
+            # Save the grid position of the selected player for annotation
+            grid_index = candidates.index.get_loc(player.name)
+            selected_positions[role_name] = (grid_index // 10, grid_index % 10, player['player_name'])
+            break
 
-plt.title('Confusion Matrix of Model Predictions')
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.show()
-
-# Selecting the optimal players based on model predictions
-predicted_roles = model(torch.tensor(features_scaled, dtype=torch.float32))
-_, role_predictions = torch.max(predicted_roles, 1)
-
-# Create a DataFrame of selected players based on predictions
-scored_df['predicted_role'] = role_predictions.numpy()
-
-# Improved function to handle missing predictions for specific roles
-def select_top_player(df, role, score_col):
-    filtered_df = df[df['predicted_role'] == role].sort_values(by=score_col, ascending=False)
-    if not filtered_df.empty:
-        return filtered_df.iloc[0]
-    else:
-        print(f"No players predicted as role {role} ({score_col}).")
-        return pd.Series({'player_name': 'No Player Selected', 'team_abbreviation': '-', 'scorer_score': 0, 
-                          'playmaker_score': 0, 'rebounder_score': 0, 'defender_score': 0, 'utility_score': 0, 
-                          'predicted_role': role})
-
-# Select the top player for each predicted role with improved error handling
-top_scorer = select_top_player(scored_df, 0, 'scorer_score')
-top_playmaker = select_top_player(scored_df, 1, 'playmaker_score')
-top_rebounder = select_top_player(scored_df, 2, 'rebounder_score')
-top_defender = select_top_player(scored_df, 3, 'defender_score')
-top_utility = select_top_player(scored_df, 4, 'utility_score')
-
-# Create the final optimal team
-optimal_team = pd.DataFrame([top_scorer, top_playmaker, top_rebounder, top_defender, top_utility])
+# Create DataFrame of optimal team
+optimal_team_df = pd.DataFrame(optimal_team)
 
 # Display the optimal team
-print("\nOptimal 5-Man Team Based on ANN Predictions:")
-print(optimal_team[['player_name', 'team_abbreviation', 'scorer_score', 'playmaker_score', 
-                    'rebounder_score', 'defender_score', 'utility_score', 'predicted_role']])
+print("\nOptimal 5-Man Team Based on Separate Role-Specific Models (with Unique Selections):")
+print(optimal_team_df[['player_name', 'team_abbreviation', 'scorer_score', 'playmaker_score', 
+                       'rebounder_score', 'defender_score', 'utility_score', 'predicted_role']])
+
+# Function to annotate and display heatmaps with the selected players
+def plot_heatmap_with_selection(grid, role_name, candidates_df):
+    plt.figure(figsize=(8, 6))
+    im = plt.imshow(grid, cmap='RdBu_r', interpolation='nearest')
+    plt.colorbar(label='Predicted Score')
+    plt.title(f'{role_name} Heatmap of Predicted Scores')
+    plt.xlabel('Columns')
+    plt.ylabel('Rows')
+    plt.xticks(ticks=np.arange(10), labels=np.arange(1, 11))
+    plt.yticks(ticks=np.arange(10), labels=np.arange(1, 11))
+    
+    # Annotate the heatmap with the selected player's name
+    selected_player = optimal_team_df[optimal_team_df['predicted_role'] == role_name]
+    for _, player in selected_player.iterrows():
+        grid_index = candidates_df[candidates_df['player_name'] == player['player_name']].index[0]
+        row, col = divmod(grid_index, 10)
+        plt.text(col, row, player['player_name'], ha='center', va='center', 
+                 color='black', fontweight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+    
+    plt.show()
+
+# Plot each heatmap with the correct final selected player names
+plot_heatmap_with_selection(scorer_grid, 'Scorer', scorer_candidates)
+plot_heatmap_with_selection(playmaker_grid, 'Playmaker', playmaker_candidates)
+plot_heatmap_with_selection(rebounder_grid, 'Rebounder', rebounder_candidates)
+plot_heatmap_with_selection(defender_grid, 'Defender', defender_candidates)
+plot_heatmap_with_selection(utility_grid, 'Utility', utility_candidates)
