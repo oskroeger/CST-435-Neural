@@ -2,36 +2,41 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping
 import pandas as pd
+import os
+from PIL import Image
+import matplotlib.pyplot as plt
+
+# Enable mixed precision training (if supported)
+from tensorflow.keras import mixed_precision
+mixed_precision.set_global_policy('mixed_float16')
 
 # Load the CSV files
-train_df = pd.read_csv('Training_set.csv')  # Ensure correct path
-test_df = pd.read_csv('Testing_set.csv')    # Ensure correct path
+train_df = pd.read_csv('Training_set.csv')
+test_df = pd.read_csv('Testing_set.csv')
 
 # Set image directories
-train_dir = 'train/'  # Path to folder containing training images
-test_dir = 'test/'    # Path to folder containing test images
+train_dir = 'train/'
+test_dir = 'test/'
 
-# Image Data Generators
+# Simplified Image Data Generators
 train_datagen = ImageDataGenerator(
-    rescale=1./255,  # Normalizing the image pixel values
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    horizontal_flip=True
+    rescale=1./255,
+    horizontal_flip=True  # Simple augmentation
 )
 
-test_datagen = ImageDataGenerator(rescale=1./255)  # Only rescale for test data, no augmentation
+test_datagen = ImageDataGenerator(rescale=1./255)
 
-# Training data generator
+# Training data generator with reduced image size and increased batch size
 train_generator = train_datagen.flow_from_dataframe(
     dataframe=train_df,
     directory=train_dir,
-    x_col='filename',   # Column with image filenames
-    y_col='label',      # Column with class labels
-    target_size=(64, 64),  # Reduced image size to make training faster
-    batch_size=16,        # Use a reasonable batch size
-    class_mode='categorical',  # Use 'categorical' for multi-class classification
+    x_col='filename',
+    y_col='label',
+    target_size=(96, 96),  # Reduced image size to make training faster
+    batch_size=32,         # Increased batch size
+    class_mode='categorical',
     shuffle=True
 )
 
@@ -39,25 +44,25 @@ train_generator = train_datagen.flow_from_dataframe(
 test_generator = test_datagen.flow_from_dataframe(
     dataframe=test_df,
     directory=test_dir,
-    x_col='filename',   # Column with image filenames
-    y_col=None,         # No labels for the test set
-    target_size=(64, 64),  # Same reduced image size as training
-    batch_size=16,
-    class_mode=None,    # No labels, so set to None
-    shuffle=False       # Do not shuffle to preserve the order of filenames
+    x_col='filename',
+    y_col=None,
+    target_size=(96, 96),  # Match image size with training set
+    batch_size=32,         # Increased batch size for efficiency
+    class_mode=None,
+    shuffle=False
 )
 
-# Load the pre-trained MobileNetV2 model (with weights pre-trained on ImageNet)
-base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(64, 64, 3))
+# Load a smaller MobileNetV2 model with alpha=0.75 for fewer parameters
+base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(96, 96, 3), alpha=0.75)
 
-# Freeze the base model layers
+# Freeze the base model layers initially
 base_model.trainable = False
 
 # Build the new model on top of MobileNetV2
 model = models.Sequential([
-    base_model,  # Add the pre-trained MobileNetV2 base model
-    layers.GlobalAveragePooling2D(),  # Pooling layer to reduce dimensionality
-    layers.Dense(128, activation='relu'),  # Fully connected layer
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(128, activation='relu'),
     layers.Dense(75, activation='softmax')  # Output layer with 75 classes for butterfly species
 ])
 
@@ -66,26 +71,54 @@ model.compile(optimizer='adam',
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-# Train the model (no validation for simplicity)
+# Early stopping callback
+early_stopping = EarlyStopping(monitor='accuracy', patience=2, restore_best_weights=True)
+
+# Train the model (stop after 10 epochs as accuracy is already high)
 history = model.fit(
     train_generator,
-    epochs=10
+    epochs=10,  # Stop after the first wave of 10 epochs
+    callbacks=[early_stopping],
+    verbose=1
 )
 
 # Predict on the test set (without labels)
 test_predictions = model.predict(test_generator)
+predicted_labels = tf.argmax(test_predictions, axis=1).numpy()
 
-# Convert the predictions (logits) to class labels (indices)
-predicted_labels = tf.argmax(test_predictions, axis=1).numpy()  # Convert Tensor to NumPy array
-
-# Convert predicted labels (integers) to their corresponding class names
+# Convert predicted labels to class names
 label_map = dict((v, k) for k, v in train_generator.class_indices.items())
 predicted_class_names = [label_map[label] for label in predicted_labels]
 
-# Add the predicted labels to the test DataFrame
-test_df['predicted_label'] = predicted_class_names
-
 # Save predictions to a CSV file
+test_df['predicted_label'] = predicted_class_names
 test_df.to_csv('submission.csv', columns=['filename', 'predicted_label'], index=False)
 
 print("Predictions saved to submission.csv.")
+
+import random
+
+# Function to display 4 random test images along with their predicted labels (in original size)
+def display_random_predictions(test_df, test_dir, predicted_class_names):
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8))  # 2x2 grid for images
+    axes = axes.ravel()  # Flatten the axes array for easier indexing
+
+    # Select 4 random indices from the test DataFrame
+    random_indices = random.sample(range(len(test_df)), 4)
+
+    for i, idx in enumerate(random_indices):  # Loop through the random indices
+        img_path = os.path.join(test_dir, test_df['filename'].iloc[idx])  # Get image path
+        
+        # Load the original image without resizing
+        original_img = Image.open(img_path)  # Open the image in its original size
+        
+        # Display the original image in the grid
+        axes[i].imshow(original_img)
+        axes[i].axis('off')  # Hide axes
+        axes[i].set_title(f"Pred: {predicted_class_names[idx]}")  # Display predicted label
+
+    plt.tight_layout()  # Adjust layout to prevent overlapping
+    plt.show()
+
+# Call the function to display 4 random images and their predictions
+display_random_predictions(test_df, test_dir, predicted_class_names)
