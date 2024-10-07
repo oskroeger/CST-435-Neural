@@ -156,3 +156,36 @@ def display_random_predictions(test_df, test_dir, predicted_class_names):
 
 # Display 4 random test images and their predictions
 display_random_predictions(test_df, test_dir, predicted_class_names)
+
+# Plot accuracy and loss over epochs
+def plot_accuracy_and_loss(history):
+    # Get the values from the history object
+    accuracy = history.history['accuracy']
+    loss = history.history['loss']
+    epochs = range(1, len(accuracy) + 1)
+    
+    # Plot accuracy
+    plt.figure(figsize=(14, 6))
+    
+    # Accuracy plot
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, accuracy, 'bo-', label='Training accuracy')
+    plt.title('Training Accuracy over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    
+    # Loss plot
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, loss, 'ro-', label='Training loss')
+    plt.title('Training Loss over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Show the plot
+    plt.tight_layout()
+    plt.show()
+
+# Call the function after training
+plot_accuracy_and_loss(history)
